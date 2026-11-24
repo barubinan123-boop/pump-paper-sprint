@@ -39,10 +39,12 @@ const RING = 12;
 const ENTRY_BUY_SHARE = 0.6;
 /** Entry: the coin's latest trade must be this recent (3600 slots, ~24 min). */
 const MAX_TRADE_AGE_SLOTS = 3600;
-/** Entry orders tolerate this much slippage (300 bps). */
-const SLIPPAGE_BPS = 300;
-/** Exit orders tolerate this much slippage (500 bps, exits must land). */
-const EXIT_SLIPPAGE_BPS = 500;
+/** Entry orders tolerate this much slippage (1000 bps): in a fast burst the
+ * price runs on within 2 slots of latency, and a tight cap rejects exactly
+ * the buys whose run is still going — adverse selection. */
+const SLIPPAGE_BPS = 1000;
+/** Exit orders tolerate this much slippage (1000 bps, exits must land even in a dump). */
+const EXIT_SLIPPAGE_BPS = 1000;
 
 /** Early burst: a coin in its first trades, still pumping on buy tape. */
 const EARLY_MAX_TRADES = 30;
