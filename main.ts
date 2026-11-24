@@ -1,11 +1,13 @@
 // Pump.fun Paper Sprint — "Sprint Momentum" strategy.
 //
 // A paper-trading bot for the agent-fun/replay/v2 protocol. It watches every
-// pump.fun bonding curve in the replay window and rides short, sharp bursts of
-// buying momentum, then gets out fast: take-profit, stop-loss, a trailing stop
-// and a hard maximum hold time. Position sizes stay small and fixed so one bad
-// coin can never sink the run, and the freed slot is immediately recycled into
-// the next candidate, which is what lets the bot cover many coins in 6 hours.
+// pump.fun bonding curve in the replay window and takes only two fast shapes:
+// a burst on a brand-new coin, or sustained momentum on an established coin —
+// the two patterns that held up in an offline read of the dev window's tape,
+// since the average coin bleeds at every horizon. Each entry exits fast with
+// a take-profit, a stop-loss, a trailing stop and a maximum hold time, so one
+// bad coin can never sink the run, and the freed slot is immediately recycled
+// into the next candidate, which is what lets the bot cover many coins in 6 hours.
 //
 // Rules of the game this bot plays by:
 // - Paper trading only: it only ever emits buy/sell orders to the harness.
@@ -19,6 +21,12 @@ import { runBot } from './vendor/makefun-bot.ts';
 import type { Batch, BotState, OrderInput } from './vendor/makefun-bot.ts';
 
 // ------------------------------------------------------------------ tuning
+//
+// Tuned against the dev window's tape (offline analysis of the kit dataset):
+// pump.fun coins bleed on average at every horizon, so the only edges found
+// were very fast ones — a burst on a brand-new coin, or sustained momentum on
+// an established coin — both exited within minutes. Entries below chase those
+// two shapes and nothing else; exits are tight because the bleed resumes fast.
 
 /** SOL per entry, in lamports (0.10 SOL). Small and fixed: one rug hurts little. */
 const BUY_LAMPORTS = 100_000_000n;
@@ -28,26 +36,32 @@ const MIN_BUY_LAMPORTS = 20_000_000n;
 const MIN_TRADES = 4;
 /** Trades kept per coin for the momentum / volume read. */
 const RING = 12;
-/** Entry: price rise over the ring, as a fraction (10%). */
-const ENTRY_MOMENTUM = 0.1;
 /** Entry: share of recent SOL volume that must be buys (60%). */
 const ENTRY_BUY_SHARE = 0.6;
-/** Entry: price may not already be up more than this since first seen (50%). */
-const MAX_RUN_UP = 0.5;
-/** Exit: take profit at +15% over entry. */
-const TAKE_PROFIT = 0.15;
-/** Exit: stop loss at -7% under entry. */
-const STOP_LOSS = 0.07;
-/** Exit: trailing stop, 8% below the best price seen since entry. */
-const TRAILING_DROP = 0.08;
-/** Exit: give up on a flat position after this many slots (~16 min). */
-const MAX_HOLD_SLOTS = 2400;
 /** Entry: the coin's latest trade must be this recent (3600 slots, ~24 min). */
 const MAX_TRADE_AGE_SLOTS = 3600;
 /** Entry orders tolerate this much slippage (300 bps). */
 const SLIPPAGE_BPS = 300;
 /** Exit orders tolerate this much slippage (500 bps, exits must land). */
 const EXIT_SLIPPAGE_BPS = 500;
+
+/** Early burst: a coin in its first trades, still pumping on buy tape. */
+const EARLY_MAX_TRADES = 40;
+const EARLY_MAX_AGE_SLOTS = 1200;
+const EARLY_MOMENTUM = 0.05;
+const EARLY_MAX_RUN_UP = 0.6;
+const EARLY_TAKE_PROFIT = 0.12;
+const EARLY_STOP_LOSS = 0.06;
+const EARLY_TRAILING_DROP = 0.06;
+const EARLY_MAX_HOLD_SLOTS = 600;
+
+/** Established momentum: an older coin still pushing up on buy tape. */
+const EST_MIN_AGE_SLOTS = 3600;
+const EST_MOMENTUM = 0.1;
+const EST_TAKE_PROFIT = 0.08;
+const EST_STOP_LOSS = 0.04;
+const EST_TRAILING_DROP = 0.05;
+const EST_MAX_HOLD_SLOTS = 1200;
 
 // ------------------------------------------------------------------- state
 
@@ -59,6 +73,8 @@ interface CoinTrack {
   sellVol: bigint;
   /** Price at first sight, for the run-up guard. */
   firstPrice: number;
+  /** Slot this coin was first seen. */
+  firstSlot: number;
   /** Slot this coin was last seen, for pruning. */
   lastSlot: number;
   /** Slot of its most recent trade, for the recency guard. */
@@ -74,6 +90,11 @@ interface OpenTrade {
   peak: number;
   /** Slot the buy was decided, for the maximum hold. */
   slot: number;
+  /** Exit profile chosen at entry (early burst vs established momentum). */
+  takeProfit: number;
+  stopLoss: number;
+  trailingDrop: number;
+  maxHoldSlots: number;
 }
 
 /** Price of a curve right now: virtual SOL reserves per virtual token reserve. */
@@ -95,7 +116,7 @@ function pruneStale(nowSlot: number): void {
 function observeTrade(mint: string, price: number, isBuy: boolean, solAmount: bigint, slot: number): void {
   let t = tracks.get(mint);
   if (t === undefined) {
-    t = { prices: [], buyVol: 0n, sellVol: 0n, firstPrice: price, lastSlot: slot, lastTradeSlot: slot, trades: 0 };
+    t = { prices: [], buyVol: 0n, sellVol: 0n, firstPrice: price, firstSlot: slot, lastSlot: slot, lastTradeSlot: slot, trades: 0 };
     tracks.set(mint, t);
   }
   t.prices.push(price);
@@ -180,7 +201,15 @@ await runBot({
       const trade = open.get(mint);
       if (trade === undefined) {
         // A position with no entry record (should not happen): track from here.
-        open.set(mint, { entry: price, peak: price, slot: batch.slot });
+        open.set(mint, {
+          entry: price,
+          peak: price,
+          slot: batch.slot,
+          takeProfit: EST_TAKE_PROFIT,
+          stopLoss: EST_STOP_LOSS,
+          trailingDrop: EST_TRAILING_DROP,
+          maxHoldSlots: EST_MAX_HOLD_SLOTS,
+        });
         continue;
       }
       if (price > trade.peak) trade.peak = price;
@@ -188,10 +217,10 @@ await runBot({
       const offPeak = price / trade.peak - 1;
       const held = batch.slot - trade.slot;
       const exit =
-        gain >= TAKE_PROFIT ||
-        gain <= -STOP_LOSS ||
-        offPeak <= -TRAILING_DROP ||
-        held >= MAX_HOLD_SLOTS;
+        gain >= trade.takeProfit ||
+        gain <= -trade.stopLoss ||
+        offPeak <= -trade.trailingDrop ||
+        held >= trade.maxHoldSlots;
       if (exit) {
         orders.push({
           side: 'sell',
@@ -203,7 +232,8 @@ await runBot({
       }
     }
 
-    // --- entries: fresh momentum, buy-dominated tape, not already run away.
+    // --- entries: two fast shapes only — an early burst, or sustained
+    // momentum on an established coin. Everything else bleeds on average.
     const freeSlots = state.hello.caps.max_open_positions - state.committedPositionCount();
     if (freeSlots > 0) {
       let buys = 0;
@@ -225,10 +255,35 @@ await runBot({
         if (batch.slot - t.lastTradeSlot > MAX_TRADE_AGE_SLOTS) continue;
         const price = t.prices[t.prices.length - 1];
         if (price <= 0) continue;
-        if (price / t.firstPrice - 1 > MAX_RUN_UP) continue;
-        if (ringMomentum(t) < ENTRY_MOMENTUM) continue;
         if (buyShare(t) < ENTRY_BUY_SHARE) continue;
         if (!stillRising(t)) continue;
+
+        const age = batch.slot - t.firstSlot;
+        const mom = ringMomentum(t);
+        // Shape 1: early burst — first trades, still pumping, not run away yet.
+        // Shape 2: established momentum — older coin, still pushing up.
+        let profile: Pick<OpenTrade, 'takeProfit' | 'stopLoss' | 'trailingDrop' | 'maxHoldSlots'> | null = null;
+        if (
+          t.trades <= EARLY_MAX_TRADES &&
+          age <= EARLY_MAX_AGE_SLOTS &&
+          mom >= EARLY_MOMENTUM &&
+          price / t.firstPrice - 1 <= EARLY_MAX_RUN_UP
+        ) {
+          profile = {
+            takeProfit: EARLY_TAKE_PROFIT,
+            stopLoss: EARLY_STOP_LOSS,
+            trailingDrop: EARLY_TRAILING_DROP,
+            maxHoldSlots: EARLY_MAX_HOLD_SLOTS,
+          };
+        } else if (age >= EST_MIN_AGE_SLOTS && mom >= EST_MOMENTUM) {
+          profile = {
+            takeProfit: EST_TAKE_PROFIT,
+            stopLoss: EST_STOP_LOSS,
+            trailingDrop: EST_TRAILING_DROP,
+            maxHoldSlots: EST_MAX_HOLD_SLOTS,
+          };
+        }
+        if (profile === null) continue;
 
         // Size: fixed stake, capped by the harness order-size cap and free cash.
         const cap = state.maxBuyLamports(mint);
@@ -239,7 +294,7 @@ await runBot({
         if (size < MIN_BUY_LAMPORTS) continue;
 
         orders.push({ side: 'buy', mint, quote_lamports: size.toString(), max_slippage_bps: SLIPPAGE_BPS });
-        open.set(mint, { entry: price, peak: price, slot: batch.slot });
+        open.set(mint, { entry: price, peak: price, slot: batch.slot, ...profile });
         buys += 1;
       }
     }
