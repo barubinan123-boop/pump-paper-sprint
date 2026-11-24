@@ -25,23 +25,23 @@ const BUY_LAMPORTS = 100_000_000n;
 /** Smallest buy worth paying fees on (0.02 SOL). */
 const MIN_BUY_LAMPORTS = 20_000_000n;
 /** Trades a coin must show before it can be considered. */
-const MIN_TRADES = 6;
+const MIN_TRADES = 4;
 /** Trades kept per coin for the momentum / volume read. */
-const RING = 24;
-/** Entry: price rise over the ring, as a fraction (7%). */
-const ENTRY_MOMENTUM = 0.07;
-/** Entry: share of recent SOL volume that must be buys (55%). */
-const ENTRY_BUY_SHARE = 0.55;
-/** Entry: price may not already be up more than this since first seen (80%). */
-const MAX_RUN_UP = 0.8;
-/** Exit: take profit at +30% over entry. */
-const TAKE_PROFIT = 0.3;
-/** Exit: stop loss at -12% under entry. */
-const STOP_LOSS = 0.12;
-/** Exit: trailing stop, 15% below the best price seen since entry. */
-const TRAILING_DROP = 0.15;
-/** Exit: give up on a flat position after this many slots (~48 min). */
-const MAX_HOLD_SLOTS = 7200;
+const RING = 12;
+/** Entry: price rise over the ring, as a fraction (10%). */
+const ENTRY_MOMENTUM = 0.1;
+/** Entry: share of recent SOL volume that must be buys (60%). */
+const ENTRY_BUY_SHARE = 0.6;
+/** Entry: price may not already be up more than this since first seen (50%). */
+const MAX_RUN_UP = 0.5;
+/** Exit: take profit at +15% over entry. */
+const TAKE_PROFIT = 0.15;
+/** Exit: stop loss at -7% under entry. */
+const STOP_LOSS = 0.07;
+/** Exit: trailing stop, 8% below the best price seen since entry. */
+const TRAILING_DROP = 0.08;
+/** Exit: give up on a flat position after this many slots (~16 min). */
+const MAX_HOLD_SLOTS = 2400;
 /** Entry: the coin's latest trade must be this recent (3600 slots, ~24 min). */
 const MAX_TRADE_AGE_SLOTS = 3600;
 /** Entry orders tolerate this much slippage (300 bps). */
