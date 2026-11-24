@@ -33,8 +33,9 @@ import type { Batch, BotState, OrderInput } from './vendor/makefun-bot.ts';
 // give back 25% from their peak. Simulated on the dev tape that profile nets
 // about +4% per round trip after fees.
 
-/** SOL per entry, in lamports (0.10 SOL). Small and fixed: one rug hurts little. */
-const BUY_LAMPORTS = 100_000_000n;
+/** SOL per entry, in lamports (0.05 SOL). Small and fixed: one rug hurts little,
+ * and a small order moves a young curve's price far less than a big one. */
+const BUY_LAMPORTS = 50_000_000n;
 /** Smallest buy worth paying fees on (0.02 SOL). */
 const MIN_BUY_LAMPORTS = 20_000_000n;
 /** Trades a coin must show before it can be considered. */
@@ -181,6 +182,27 @@ await runBot({
     }
     pruneStale(batch.slot);
 
+    // Correct entry prices to what the fills actually paid: a buy resolves
+    // 2 slots after the decision, against the slot's last trade and moved by
+    // the order's own impact, so the fill runs ~7% above the decision price
+    // on average. Measuring the stop-loss and trailing stop from the decision
+    // price instead lets losers run ~7% deeper than intended before exiting.
+    for (const f of batch.fills) {
+      if (f.side === 'buy' && f.status === 'filled') {
+        const tokens = BigInt(f.token_amount);
+        const quote = BigInt(f.quote_lamports);
+        if (tokens > 0n && quote > 0n) {
+          const fillPrice = Number(quote) / Number(tokens);
+          const trade = open.get(f.mint);
+          if (trade !== undefined) {
+            trade.entry = fillPrice;
+            if (fillPrice > trade.peak) trade.peak = fillPrice;
+          }
+        }
+      }
+      if (f.side === 'sell' && f.status === 'filled') open.delete(f.mint);
+    }
+
     // Drop entry records for buys that never became a position (rejected or
     // failed fills): without this a dead buy would block its mint forever.
     for (const mint of [...open.keys()]) {
@@ -224,14 +246,23 @@ await runBot({
         gain <= -trade.stopLoss ||
         offPeak <= -trade.trailingDrop ||
         held >= trade.maxHoldSlots;
-      if (exit) {
+      // A sell already in flight covers this position: do not send another.
+      // The entry record is dropped when the sell's fill lands, so a failed
+      // or rejected sell is retried on the next batch with its cost intact.
+      let sellPending = false;
+      for (const p of state.pending.values()) {
+        if (p.order.side === 'sell' && p.order.mint === mint) {
+          sellPending = true;
+          break;
+        }
+      }
+      if (exit && !sellPending) {
         orders.push({
           side: 'sell',
           mint,
           token_amount: holding.token_amount.toString(),
           max_slippage_bps: EXIT_SLIPPAGE_BPS,
         });
-        open.delete(mint);
       }
     }
 
