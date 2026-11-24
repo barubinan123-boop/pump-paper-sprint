@@ -23,21 +23,29 @@ import type { Batch, BotState, OrderInput } from './vendor/makefun-bot.ts';
 
 // ------------------------------------------------------------------ tuning
 //
-// Tuned against the dev window's tape (offline analysis of the kit dataset):
-// pump.fun coins bleed on average at every horizon, so fixed take-profits
-// lose to the bleed plus ~2.5% round-trip fees in every combination tried.
-// What works is riding the rare runners: about 14% of early-burst signals
-// reach +100% within 1200 slots, while losers are cut at -3%. So entries
-// chase the early burst and exits are a tight stop-loss plus a wide trailing
-// stop with no fixed take-profit — losers cost 3%, winners ride until they
-// give back 25% from their peak. Simulated on the dev tape that profile nets
-// about +4% per round trip after fees.
+// Tuned against the dev window's tape (offline analysis of the kit dataset
+// plus an instrumented run of the real harness engine): pump.fun coins bleed
+// on average at every horizon, so fixed take-profits lose to the bleed plus
+// ~2.7% round-trip fees in every combination tried. What works best is riding
+// the rare runners: about 14% of early-burst signals reach +100% within 1200
+// slots. So entries chase only strong early bursts (12+ trades, +15% over
+// the last 12, buy-dominated tape) and exits are a stop-loss plus a wide
+// trailing stop with no fixed take-profit. Two execution details matter as
+// much as the signal: a buy resolves 2 slots after the decision, against the
+// slot's last trade, so fills run ~6% above the decision price — entries are
+// therefore re-based to the fill price when it lands, and a tight 150 bps buy
+// slippage rejects (for free) the fills that ran furthest. Small 0.02 SOL
+// orders keep the bot's own price impact down. Net dev PnL is still slightly
+// negative on this brutal window; the profile is a high-variance lottery
+// ticket on the final window's runners, which is the only shape that can
+// finish above zero here.
 
-/** SOL per entry, in lamports (0.05 SOL). Small and fixed: one rug hurts little,
- * and a small order moves a young curve's price far less than a big one. */
-const BUY_LAMPORTS = 50_000_000n;
-/** Smallest buy worth paying fees on (0.02 SOL). */
-const MIN_BUY_LAMPORTS = 20_000_000n;
+/** SOL per entry, in lamports (0.02 SOL). Small and fixed: one rug hurts little,
+ * and a small order moves a young curve's price far less than a big one — the
+ * buy fill premium fell from ~9% at 0.10 SOL to ~6% at 0.02 SOL. */
+const BUY_LAMPORTS = 20000000n;
+/** Smallest buy worth paying fees on (0.01 SOL, the guardrail's round-trip bar). */
+const MIN_BUY_LAMPORTS = 10000000n;
 /** Trades a coin must show before it can be considered (12: a full ring of
  * evidence — firing on 4-6 trades proved far noisier in the replay). */
 const MIN_TRADES = 12;
@@ -47,22 +55,24 @@ const RING = 12;
 const ENTRY_BUY_SHARE = 0.6;
 /** Entry: the coin's latest trade must be this recent (3600 slots, ~24 min). */
 const MAX_TRADE_AGE_SLOTS = 3600;
-/** Entry orders tolerate this much slippage (1000 bps): in a fast burst the
- * price runs on within 2 slots of latency, and a tight cap rejects exactly
- * the buys whose run is still going — adverse selection. */
-const SLIPPAGE_BPS = 1000;
+/** Entry orders tolerate this much slippage (150 bps): a buy whose fill would
+ * land more than 1.5% above the decision price is rejected for free, which
+ * filters out entries whose burst already ran away in the 2 slots of latency. */
+const SLIPPAGE_BPS = 150;
 /** Exit orders tolerate this much slippage (1000 bps, exits must land even in a dump). */
 const EXIT_SLIPPAGE_BPS = 1000;
 
-/** Early burst: a coin in its first trades, still pumping on buy tape. */
+/** Early burst: a coin in its first trades, still pumping on buy tape.
+ * Momentum is measured over the last 12 trades and must clear 15%: weaker
+ * bursts lose to the bleed plus ~2.7% round-trip fees in the replay. */
 const EARLY_MAX_TRADES = 30;
 const EARLY_MAX_AGE_SLOTS = 1200;
-const EARLY_MOMENTUM = 0.05;
+const EARLY_MOMENTUM = 0.15;
 const EARLY_MAX_RUN_UP = 0.6;
 /** Exit: no fixed take-profit — winners ride under the trailing stop. */
 const EARLY_TAKE_PROFIT = 10;
-/** Exit: stop loss at -3% under entry. */
-const EARLY_STOP_LOSS = 0.03;
+/** Exit: stop loss at -6% under the fill price. */
+const EARLY_STOP_LOSS = 0.06;
 /** Exit: trailing stop, 25% below the best price seen since entry. */
 const EARLY_TRAILING_DROP = 0.25;
 /** Exit: give up on a flat position after this many slots (~8 min). */
