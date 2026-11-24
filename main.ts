@@ -38,8 +38,9 @@ import type { Batch, BotState, OrderInput } from './vendor/makefun-bot.ts';
 const BUY_LAMPORTS = 50_000_000n;
 /** Smallest buy worth paying fees on (0.02 SOL). */
 const MIN_BUY_LAMPORTS = 20_000_000n;
-/** Trades a coin must show before it can be considered. */
-const MIN_TRADES = 4;
+/** Trades a coin must show before it can be considered (12: a full ring of
+ * evidence — firing on 4-6 trades proved far noisier in the replay). */
+const MIN_TRADES = 12;
 /** Trades kept per coin for the momentum / volume read. */
 const RING = 12;
 /** Entry: share of recent SOL volume that must be buys (60%). */
