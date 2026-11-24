@@ -1,13 +1,13 @@
 // Pump.fun Paper Sprint — "Sprint Momentum" strategy.
 //
 // A paper-trading bot for the agent-fun/replay/v2 protocol. It watches every
-// pump.fun bonding curve in the replay window and takes only two fast shapes:
-// a burst on a brand-new coin, or sustained momentum on an established coin —
-// the two patterns that held up in an offline read of the dev window's tape,
-// since the average coin bleeds at every horizon. Each entry exits fast with
-// a take-profit, a stop-loss, a trailing stop and a maximum hold time, so one
-// bad coin can never sink the run, and the freed slot is immediately recycled
-// into the next candidate, which is what lets the bot cover many coins in 6 hours.
+// pump.fun bonding curve in the replay window and takes only one shape: a burst
+// on a brand-new coin — the single pattern with a positive mean forward return
+// from the fill price in an offline read of the dev window's tape, and only
+// inside ~60 slots. Each entry therefore exits very fast with a take-profit,
+// a stop-loss, a trailing stop and a maximum hold time, so one bad coin can
+// never sink the run, and the freed slot is immediately recycled into the
+// next candidate, which is what lets the bot cover many coins in 6 hours.
 //
 // Rules of the game this bot plays by:
 // - Paper trading only: it only ever emits buy/sell orders to the harness.
@@ -23,10 +23,9 @@ import type { Batch, BotState, OrderInput } from './vendor/makefun-bot.ts';
 // ------------------------------------------------------------------ tuning
 //
 // Tuned against the dev window's tape (offline analysis of the kit dataset):
-// pump.fun coins bleed on average at every horizon, so the only edges found
-// were very fast ones — a burst on a brand-new coin, or sustained momentum on
-// an established coin — both exited within minutes. Entries below chase those
-// two shapes and nothing else; exits are tight because the bleed resumes fast.
+// pump.fun coins bleed on average at every horizon, so the only edge found
+// was a burst on a brand-new coin, exited within ~60 slots. Entries below
+// chase that shape and nothing else; exits are tight because the bleed resumes fast.
 
 /** SOL per entry, in lamports (0.10 SOL). Small and fixed: one rug hurts little. */
 const BUY_LAMPORTS = 100_000_000n;
@@ -46,22 +45,14 @@ const SLIPPAGE_BPS = 300;
 const EXIT_SLIPPAGE_BPS = 500;
 
 /** Early burst: a coin in its first trades, still pumping on buy tape. */
-const EARLY_MAX_TRADES = 40;
+const EARLY_MAX_TRADES = 30;
 const EARLY_MAX_AGE_SLOTS = 1200;
 const EARLY_MOMENTUM = 0.05;
 const EARLY_MAX_RUN_UP = 0.6;
-const EARLY_TAKE_PROFIT = 0.12;
-const EARLY_STOP_LOSS = 0.06;
-const EARLY_TRAILING_DROP = 0.06;
-const EARLY_MAX_HOLD_SLOTS = 600;
-
-/** Established momentum: an older coin still pushing up on buy tape. */
-const EST_MIN_AGE_SLOTS = 3600;
-const EST_MOMENTUM = 0.1;
-const EST_TAKE_PROFIT = 0.08;
-const EST_STOP_LOSS = 0.04;
-const EST_TRAILING_DROP = 0.05;
-const EST_MAX_HOLD_SLOTS = 1200;
+const EARLY_TAKE_PROFIT = 0.08;
+const EARLY_STOP_LOSS = 0.04;
+const EARLY_TRAILING_DROP = 0.04;
+const EARLY_MAX_HOLD_SLOTS = 120;
 
 // ------------------------------------------------------------------- state
 
@@ -205,10 +196,10 @@ await runBot({
           entry: price,
           peak: price,
           slot: batch.slot,
-          takeProfit: EST_TAKE_PROFIT,
-          stopLoss: EST_STOP_LOSS,
-          trailingDrop: EST_TRAILING_DROP,
-          maxHoldSlots: EST_MAX_HOLD_SLOTS,
+          takeProfit: EARLY_TAKE_PROFIT,
+          stopLoss: EARLY_STOP_LOSS,
+          trailingDrop: EARLY_TRAILING_DROP,
+          maxHoldSlots: EARLY_MAX_HOLD_SLOTS,
         });
         continue;
       }
@@ -261,7 +252,8 @@ await runBot({
         const age = batch.slot - t.firstSlot;
         const mom = ringMomentum(t);
         // Shape 1: early burst — first trades, still pumping, not run away yet.
-        // Shape 2: established momentum — older coin, still pushing up.
+        // (The only shape with a positive mean forward return from the fill
+        // price in the dev tape, and only inside ~60 slots: exit fast.)
         let profile: Pick<OpenTrade, 'takeProfit' | 'stopLoss' | 'trailingDrop' | 'maxHoldSlots'> | null = null;
         if (
           t.trades <= EARLY_MAX_TRADES &&
@@ -274,13 +266,6 @@ await runBot({
             stopLoss: EARLY_STOP_LOSS,
             trailingDrop: EARLY_TRAILING_DROP,
             maxHoldSlots: EARLY_MAX_HOLD_SLOTS,
-          };
-        } else if (age >= EST_MIN_AGE_SLOTS && mom >= EST_MOMENTUM) {
-          profile = {
-            takeProfit: EST_TAKE_PROFIT,
-            stopLoss: EST_STOP_LOSS,
-            trailingDrop: EST_TRAILING_DROP,
-            maxHoldSlots: EST_MAX_HOLD_SLOTS,
           };
         }
         if (profile === null) continue;
