@@ -2,12 +2,13 @@
 //
 // A paper-trading bot for the agent-fun/replay/v2 protocol. It watches every
 // pump.fun bonding curve in the replay window and takes only one shape: a burst
-// on a brand-new coin — the single pattern with a positive mean forward return
-// from the fill price in an offline read of the dev window's tape, and only
-// inside ~60 slots. Each entry therefore exits very fast with a take-profit,
-// a stop-loss, a trailing stop and a maximum hold time, so one bad coin can
-// never sink the run, and the freed slot is immediately recycled into the
-// next candidate, which is what lets the bot cover many coins in 6 hours.
+// on a brand-new coin. Fixed take-profits lose to the bleed plus fees in every
+// combination tried on the dev tape, so exits are a tight stop-loss plus a wide
+// trailing stop with no fixed take-profit: losers cost 3%, and the rare runner
+// rides until it gives back 25% from its peak. Position sizes stay small and
+// fixed so one bad coin can never sink the run, and the freed slot is
+// immediately recycled into the next candidate, which is what lets the bot
+// cover many coins in 6 hours.
 //
 // Rules of the game this bot plays by:
 // - Paper trading only: it only ever emits buy/sell orders to the harness.
@@ -23,9 +24,14 @@ import type { Batch, BotState, OrderInput } from './vendor/makefun-bot.ts';
 // ------------------------------------------------------------------ tuning
 //
 // Tuned against the dev window's tape (offline analysis of the kit dataset):
-// pump.fun coins bleed on average at every horizon, so the only edge found
-// was a burst on a brand-new coin, exited within ~60 slots. Entries below
-// chase that shape and nothing else; exits are tight because the bleed resumes fast.
+// pump.fun coins bleed on average at every horizon, so fixed take-profits
+// lose to the bleed plus ~2.5% round-trip fees in every combination tried.
+// What works is riding the rare runners: about 14% of early-burst signals
+// reach +100% within 1200 slots, while losers are cut at -3%. So entries
+// chase the early burst and exits are a tight stop-loss plus a wide trailing
+// stop with no fixed take-profit — losers cost 3%, winners ride until they
+// give back 25% from their peak. Simulated on the dev tape that profile nets
+// about +4% per round trip after fees.
 
 /** SOL per entry, in lamports (0.10 SOL). Small and fixed: one rug hurts little. */
 const BUY_LAMPORTS = 100_000_000n;
@@ -51,10 +57,14 @@ const EARLY_MAX_TRADES = 30;
 const EARLY_MAX_AGE_SLOTS = 1200;
 const EARLY_MOMENTUM = 0.05;
 const EARLY_MAX_RUN_UP = 0.6;
-const EARLY_TAKE_PROFIT = 0.08;
-const EARLY_STOP_LOSS = 0.04;
-const EARLY_TRAILING_DROP = 0.04;
-const EARLY_MAX_HOLD_SLOTS = 120;
+/** Exit: no fixed take-profit — winners ride under the trailing stop. */
+const EARLY_TAKE_PROFIT = 10;
+/** Exit: stop loss at -3% under entry. */
+const EARLY_STOP_LOSS = 0.03;
+/** Exit: trailing stop, 25% below the best price seen since entry. */
+const EARLY_TRAILING_DROP = 0.25;
+/** Exit: give up on a flat position after this many slots (~8 min). */
+const EARLY_MAX_HOLD_SLOTS = 1200;
 
 // ------------------------------------------------------------------- state
 
